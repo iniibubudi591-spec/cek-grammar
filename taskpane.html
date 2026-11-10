@@ -162,7 +162,7 @@ Office.onReady(function (info) {
 function petunjuk(kode, data, raw) {
   var pesan = (data && data.error && data.error.message) || String(raw).slice(0, 300);
   var peta = {
-    400: "API key tidak valid, atau permintaan salah format.",
+    400: "Permintaan ditolak. Bisa karena API key salah, atau model tidak mendukung fitur yang diminta. Baca pesan server.",
     401: "API key salah atau tidak aktif.",
     403: "API key tidak punya izin, atau dibatasi.",
     404: "Nama model tidak ditemukan. Klik Cari model.",
@@ -178,7 +178,17 @@ function petunjuk(kode, data, raw) {
 function galat(kode, data, raw) {
   var e = new Error(petunjuk(kode, data, raw));
   e.kode = kode;
+  e.pesan = (data && data.error && data.error.message) || String(raw).slice(0, 300);
   return e;
+}
+
+function butuhTanpaJson(e) {
+  return e && e.kode === 400 && /json mode|mime|schema|not enabled|not supported/i.test(e.pesan || "");
+}
+
+function bolehPindah(e) {
+  if (KODE_PINDAH.indexOf(e.kode) >= 0 || e.kode === 404) return true;
+  return e.kode === 400 && /models\//i.test(e.pesan || "");
 }
 
 async function kirim(url, opsi) {
@@ -289,9 +299,18 @@ function ambilArray(txt) {
 
 async function tanya(prov, key, model, teks) {
   var isi;
-  if (prov === "openai") isi = await panggilOpenAI(key, model, buatPrompt(teks, "objek"));
-  else if (/^gemma/i.test(model)) isi = await panggilGemini(key, model, buatPrompt(teks, "array"), false);
-  else isi = await panggilGemini(key, model, buatPrompt(teks, "skema"), true);
+  if (prov === "openai") {
+    isi = await panggilOpenAI(key, model, buatPrompt(teks, "objek"));
+  } else if (/^gemma/i.test(model)) {
+    isi = await panggilGemini(key, model, buatPrompt(teks, "array"), false);
+  } else {
+    try {
+      isi = await panggilGemini(key, model, buatPrompt(teks, "skema"), true);
+    } catch (e) {
+      if (!butuhTanpaJson(e)) throw e;
+      isi = await panggilGemini(key, model, buatPrompt(teks, "array"), false);
+    }
+  }
 
   return ambilArray(isi).filter(function (t) {
     return t && typeof t.salah === "string" && typeof t.saran === "string" &&
@@ -335,9 +354,14 @@ async function cariModel() {
       nama = ((d2 && d2.models) || [])
         .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
         .map(function (m) { return m.name.replace(/^models\//, ""); })
-        .filter(function (n) { return !/tts|image|live|audio|embedding|robotics|veo|imagen|vision|computer-use/.test(n); });
+        .filter(function (n) { return !/tts|image|live|audio|embedding|robotics|veo|imagen|vision|computer-use|antigravity|deep-research|learnlm|aqa/.test(n); });
     }
-    nama.sort();
+    nama.sort(function (a, b) {
+      var ga = /^gemini/.test(a) ? 0 : 1;
+      var gb = /^gemini/.test(b) ? 0 : 1;
+      if (ga !== gb) return ga - gb;
+      return a < b ? -1 : 1;
+    });
     if (nama.length === 0) { status("Tidak ada model yang cocok untuk key ini.", "err"); return; }
 
     var sebelum = $("model").value;
@@ -448,7 +472,7 @@ async function periksa() {
         break;
       } catch (e) {
         terakhir = e;
-        if (KODE_PINDAH.indexOf(e.kode) < 0) throw e;
+            if (!bolehPindah(e)) throw e;
       }
     }
     if (daftar === undefined) throw terakhir;
