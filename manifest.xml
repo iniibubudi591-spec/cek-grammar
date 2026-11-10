@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:type="TaskPaneApp">
+  <Id>a3b7c1d2-5e4f-4a6b-8c9d-0e1f2a3b4c5d</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Arya</ProviderName>
+  <DefaultLocale>id-ID</DefaultLocale>
+  <DisplayName DefaultValue="Cek Grammar Gemini"/>
+  <Description DefaultValue="Pemeriksa ejaan dan grammar memakai Gemini."/>
+  <IconUrl DefaultValue="https://iniibubudi591.github.io/cek-grammar/icon32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://iniibubudi591.github.io/cek-grammar/icon64.png"/>
+  <SupportUrl DefaultValue="https://iniibubudi591.github.io/cek-grammar/"/>
+  <Hosts>
+    <Host Name="Document"/>
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://iniibubudi591.github.io/cek-grammar/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+</OfficeApp>

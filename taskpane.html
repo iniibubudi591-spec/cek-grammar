@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="IE=edge">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cek Grammar Gemini</title>
+<script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 13px; margin: 0; padding: 12px; color: #222; background: #fff; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  details { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px; margin-bottom: 10px; }
+  summary { cursor: pointer; font-weight: 600; }
+  label { display: block; margin: 8px 0 3px; font-size: 12px; color: #555; }
+  input, select { width: 100%; padding: 6px; border: 1px solid #bbb; border-radius: 4px; font-size: 13px; }
+  button { padding: 6px 10px; border: 1px solid #999; background: #f3f3f3; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  button:hover { background: #e6e6e6; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.utama { width: 100%; background: #0f6cbd; color: #fff; border-color: #0f6cbd; padding: 9px; font-size: 14px; }
+  button.utama:hover { background: #0c5a9e; }
+  .baris { display: flex; gap: 6px; margin-top: 8px; }
+  .kecil { font-size: 12px; color: #666; margin: 6px 0 10px; }
+  #status { margin: 10px 0; padding: 8px; border-radius: 4px; display: none; white-space: pre-wrap; word-break: break-word; }
+  #status.info { display: block; background: #eef5fc; }
+  #status.err { display: block; background: #fdecea; color: #8a1f11; }
+  #status.ok { display: block; background: #eaf6ec; color: #1e5b2a; }
+  .kartu { border: 1px solid #d8d8d8; border-left: 4px solid #d9534f; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+  .kartu.selesai { opacity: .5; border-left-color: #999; }
+  .jenis { display: inline-block; font-size: 11px; background: #f3e3e2; color: #8a1f11; padding: 1px 6px; border-radius: 10px; margin-bottom: 4px; }
+  .salah { text-decoration: line-through; color: #b32d2e; }
+  .saran { font-weight: 600; color: #1e7e34; }
+  .alasan { margin: 4px 0 6px; color: #444; }
+  .tombol { display: flex; gap: 6px; }
+</style>
+</head>
+<body>
+<h1>Cek Grammar</h1>
+
+<details id="setelan" open>
+  <summary>Pengaturan</summary>
+  <label for="key">API key Gemini</label>
+  <input id="key" type="password" autocomplete="off" placeholder="Tempel API key di sini">
+  <label for="model">Model</label>
+  <select id="model">
+    <option value="gemini-3.8-flash">gemini-3.8-flash (tebakan awal)</option>
+  </select>
+  <div class="baris">
+    <button id="simpan">Simpan</button>
+    <button id="cari">Cari model</button>
+  </div>
+  <p class="kecil">API key disimpan di browser Word kamu, bukan di file ini.</p>
+</details>
+
+<p class="kecil">Blok teks yang mau dicek. Kalau tidak ada yang diblok, yang dicek adalah paragraf tempat kursor berada. Maksimal 6000 karakter.</p>
+<button id="cek" class="utama">Periksa</button>
+<div id="status"></div>
+<div id="aksi" style="display:none; margin-bottom:8px;">
+  <button id="semua">Ganti semua</button>
+</div>
+<div id="hasil"></div>
+
+<script>
+var BASE = "https://generativelanguage.googleapis.com/v1beta/";
+var K_KEY = "gg_api_key";
+var K_MODEL = "gg_model";
+var MAX_CHARS = 6000;
+
+var scope = null;
+var temuan = [];
+var sibuk = false;
+
+function $(id) { return document.getElementById(id); }
+
+function simpanLokal(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+function bacaLokal(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+
+function status(teks, jenis) {
+  var el = $("status");
+  el.className = jenis || "info";
+  el.textContent = teks;
+}
+function sembunyiStatus() { $("status").className = ""; $("status").style.display = "none"; }
+
+function atur(selectEl, nilai) {
+  var ada = false;
+  for (var i = 0; i < selectEl.options.length; i++) {
+    if (selectEl.options[i].value === nilai) ada = true;
+  }
+  if (!ada) {
+    var o = document.createElement("option");
+    o.value = nilai; o.textContent = nilai;
+    selectEl.appendChild(o);
+  }
+  selectEl.value = nilai;
+}
+
+Office.onReady(function (info) {
+  $("key").value = bacaLokal(K_KEY);
+  var m = bacaLokal(K_MODEL);
+  if (m) atur($("model"), m);
+  $("simpan").onclick = function () {
+    simpanLokal(K_KEY, $("key").value.trim());
+    simpanLokal(K_MODEL, $("model").value);
+    status("Pengaturan disimpan.", "ok");
+  };
+  $("cari").onclick = cariModel;
+  $("cek").onclick = periksa;
+  $("semua").onclick = gantiSemua;
+  if (info.host !== Office.HostType.Word) {
+    status("Add-in ini dibuat untuk Word.", "err");
+  }
+});
+
+function petunjuk(kode, data, raw) {
+  var pesan = (data && data.error && data.error.message) || String(raw).slice(0, 300);
+  var peta = {
+    400: "API key tidak valid, atau permintaan salah format.",
+    403: "API key tidak punya izin, atau dibatasi di Google Cloud.",
+    404: "Nama model tidak ditemukan. Klik Cari model.",
+    429: "Kuota gratis habis atau terlalu banyak permintaan. Tunggu beberapa menit.",
+    500: "Server Google bermasalah. Coba lagi nanti.",
+    503: "Server Google sedang sibuk. Coba lagi nanti."
+  };
+  return "Kode " + kode + ". " + (peta[kode] || "") + "\nPesan server: " + pesan;
+}
+
+async function cariModel() {
+  var key = $("key").value.trim();
+  if (!key) { status("Isi API key dulu.", "err"); return; }
+  status("Mengambil daftar model...");
+  try {
+    var res;
+    try {
+      res = await fetch(BASE + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
+    } catch (e) {
+      throw new Error("Tidak bisa menjangkau server Google. Cek internet, VPN, proxy, atau firewall. Detail: " + e.message);
+    }
+    var raw = await res.text();
+    var data = null;
+    try { data = JSON.parse(raw); } catch (e) {}
+    if (!res.ok) throw new Error(petunjuk(res.status, data, raw));
+
+    var nama = ((data && data.models) || [])
+      .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
+      .map(function (m) { return m.name.replace(/^models\//, ""); })
+      .filter(function (n) { return /flash/.test(n) && !/tts|image|live|audio|embedding|robotics/.test(n); });
+
+    if (nama.length === 0) { status("Tidak ada model flash yang cocok untuk key ini.", "err"); return; }
+
+    var sel = $("model");
+    sel.innerHTML = "";
+    nama.forEach(function (n) {
+      var o = document.createElement("option");
+      o.value = n; o.textContent = n;
+      sel.appendChild(o);
+    });
+    var pilih = nama.filter(function (n) { return n.indexOf("2.5-flash") >= 0; })[0] || nama[0];
+    sel.value = pilih;
+    simpanLokal(K_KEY, key);
+    simpanLokal(K_MODEL, pilih);
+    status("Ditemukan " + nama.length + " model. Terpilih: " + pilih, "ok");
+  } catch (e) {
+    status(e.message, "err");
+  }
+}
+
+async function lepasRange() {
+  var ctx = scope ? scope.context : null;
+  temuan.forEach(function (f) {
+    try { f.range.context.trackedObjects.remove(f.range); ctx = f.range.context; } catch (e) {}
+  });
+  if (scope) { try { scope.context.trackedObjects.remove(scope); } catch (e) {} }
+  if (ctx) { try { await ctx.sync(); } catch (e) {} }
+  temuan = [];
+  scope = null;
+}
+
+async function ambilTeks() {
+  var teks = "";
+  await Word.run(async function (context) {
+    var sel = context.document.getSelection();
+    sel.load("text");
+    await context.sync();
+    var r = sel;
+    if (!sel.text || sel.text.trim().length < 3) {
+      r = sel.paragraphs.getFirst().getRange("Content");
+      r.load("text");
+      await context.sync();
+    }
+    teks = r.text;
+    context.trackedObjects.add(r);
+    await context.sync();
+    scope = r;
+  });
+  return teks.replace(/\r/g, "\n").replace(/\u0007/g, " ").replace(/\u000b/g, " ");
+}
+
+async function tanyaGemini(key, model, teks) {
+  var prompt =
+    "Kamu editor bahasa yang teliti. Periksa teks di bawah untuk salah ketik, salah ejaan, salah tata bahasa, " +
+    "pilihan kata yang kurang tepat, dan kalimat yang tidak efektif. Teks bisa berbahasa Indonesia atau Inggris. " +
+    "Tulis \"saran\" dalam bahasa yang sama dengan teks. Tulis \"alasan\" dalam bahasa Indonesia, satu kalimat pendek.\n" +
+    "Aturan:\n" +
+    "1. \"salah\" harus disalin persis dari teks, termasuk huruf besar dan tanda baca. Pilih bagian sependek mungkin yang masih jelas.\n" +
+    "2. \"saran\" adalah pengganti untuk \"salah\" saja, bukan seluruh kalimat.\n" +
+    "3. \"jenis\" harus salah satu dari: ejaan, grammar, pilihan kata, kalimat efektif, tanda baca.\n" +
+    "4. Jika kesalahan yang sama muncul lebih dari sekali, tulis setiap kemunculan.\n" +
+    "5. Urutkan sesuai urutan kemunculan di teks.\n" +
+    "6. Jangan ubah gaya penulis kalau tidak ada kesalahan nyata.\n" +
+    "7. Jika tidak ada kesalahan, kembalikan array kosong.\n" +
+    "Teks:\n" + teks;
+
+  var body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.1,
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "ARRAY",
+        items: {
+          type: "OBJECT",
+          properties: {
+            salah: { type: "STRING" },
+            saran: { type: "STRING" },
+            alasan: { type: "STRING" },
+            jenis: { type: "STRING" }
+          },
+          required: ["salah", "saran", "alasan"]
+        }
+      }
+    }
+  };
+
+  var res;
+  try {
+    res = await fetch(BASE + "models/" + encodeURIComponent(model) + ":generateContent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify(body)
+    });
+  } catch (e) {
+    throw new Error("Tidak bisa menjangkau server Google. Cek internet, VPN, proxy, atau firewall. Detail: " + e.message);
+  }
+  var raw = await res.text();
+  var data = null;
+  try { data = JSON.parse(raw); } catch (e) {}
+  if (!res.ok) throw new Error(petunjuk(res.status, data, raw));
+
+  var cand = data && data.candidates && data.candidates[0];
+  if (!cand || !cand.content || !cand.content.parts) {
+    var sebab = (data && data.promptFeedback && data.promptFeedback.blockReason) || (cand && cand.finishReason) || "tidak diketahui";
+    throw new Error("Respons kosong. Alasan: " + sebab);
+  }
+  var txt = cand.content.parts.filter(function (p) { return !p.thought; })
+    .map(function (p) { return p.text || ""; }).join("");
+  var arr;
+  try { arr = JSON.parse(txt); } catch (e) { throw new Error("Format balasan Gemini tidak bisa dibaca."); }
+  if (!Array.isArray(arr)) return [];
+
+  return arr.filter(function (t) {
+    return t && typeof t.salah === "string" && typeof t.saran === "string" &&
+      t.salah.length > 0 && t.salah.length <= 250 &&
+      t.salah.indexOf("\n") < 0 && t.salah !== t.saran;
+  });
+}
+
+async function petakan(items) {
+  var hasil = [];
+  var dipakai = {};
+  await Word.run(scope, async function (context) {
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      try {
+        var satuKata = /^[\p{L}\p{N}]+$/u.test(it.salah);
+        var hits = scope.search(it.salah.replace(/\^/g, "^^"), { matchCase: true, matchWholeWord: satuKata });
+        hits.load("items");
+        await context.sync();
+        var n = dipakai[it.salah] || 0;
+        if (n < hits.items.length) {
+          var rg = hits.items[n];
+          context.trackedObjects.add(rg);
+          await context.sync();
+          it.range = rg;
+          it.selesai = false;
+          dipakai[it.salah] = n + 1;
+          hasil.push(it);
+        }
+      } catch (e) { /* lewati temuan yang tidak bisa dicari */ }
+    }
+  });
+  return hasil;
+}
+
+async function periksa() {
+  if (sibuk) return;
+  var key = $("key").value.trim();
+  var model = $("model").value;
+  if (!key) { $("setelan").open = true; status("Isi API key dulu.", "err"); return; }
+  simpanLokal(K_KEY, key);
+  simpanLokal(K_MODEL, model);
+
+  sibuk = true;
+  $("cek").disabled = true;
+  $("aksi").style.display = "none";
+  $("hasil").innerHTML = "";
+  try {
+    await lepasRange();
+    status("Membaca teks dari dokumen...");
+    var teks = await ambilTeks();
+    if (!teks || teks.trim().length < 5) { status("Teks terlalu pendek atau kosong.", "err"); return; }
+    if (teks.length > MAX_CHARS) {
+      status("Teks terlalu panjang (" + teks.length + " karakter). Maksimal " + MAX_CHARS + ". Blok per bagian.", "err");
+      return;
+    }
+    status("Menunggu Gemini. Word tetap bisa dipakai.");
+    var daftar = await tanyaGemini(key, model, teks);
+    if (daftar.length === 0) { status("Tidak ada kesalahan yang ditemukan.", "ok"); return; }
+
+    temuan = await petakan(daftar);
+    if (temuan.length === 0) {
+      status("Gemini memberi saran, tapi teksnya tidak ketemu di dokumen. Coba periksa ulang.", "err");
+      return;
+    }
+    tampilkan();
+    status("Ditemukan " + temuan.length + " temuan.", "info");
+    $("aksi").style.display = "block";
+  } catch (e) {
+    status(e.message || String(e), "err");
+  } finally {
+    sibuk = false;
+    $("cek").disabled = false;
+  }
+}
+
+function tampilkan() {
+  var wadah = $("hasil");
+  wadah.innerHTML = "";
+  temuan.forEach(function (f) {
+    var kartu = document.createElement("div");
+    kartu.className = "kartu";
+
+    var jenis = document.createElement("div");
+    jenis.className = "jenis";
+    jenis.textContent = f.jenis || "perbaikan";
+    kartu.appendChild(jenis);
+
+    var baris = document.createElement("div");
+    var s1 = document.createElement("span"); s1.className = "salah"; s1.textContent = f.salah;
+    var s2 = document.createElement("span"); s2.textContent = "  menjadi  ";
+    var s3 = document.createElement("span"); s3.className = "saran"; s3.textContent = f.saran;
+    baris.appendChild(s1); baris.appendChild(s2); baris.appendChild(s3);
+    kartu.appendChild(baris);
+
+    var alasan = document.createElement("div");
+    alasan.className = "alasan";
+    alasan.textContent = f.alasan || "";
+    kartu.appendChild(alasan);
+
+    var tombol = document.createElement("div");
+    tombol.className = "tombol";
+    var bLihat = document.createElement("button"); bLihat.textContent = "Lihat";
+    var bGanti = document.createElement("button"); bGanti.textContent = "Ganti";
+    var bLewat = document.createElement("button"); bLewat.textContent = "Lewati";
+    tombol.appendChild(bLihat); tombol.appendChild(bGanti); tombol.appendChild(bLewat);
+    kartu.appendChild(tombol);
+
+    f.kartu = kartu;
+    f.tombol = [bLihat, bGanti, bLewat];
+
+    bLihat.onclick = function () { lihat(f); };
+    bGanti.onclick = async function () {
+      var ok = await ganti(f);
+      if (ok) tutup(f, "Sudah diganti");
+      else status("Teks sudah berubah, tidak bisa diganti.", "err");
+    };
+    bLewat.onclick = function () { tutup(f, "Dilewati"); };
+
+    wadah.appendChild(kartu);
+  });
+}
+
+function tutup(f, ket) {
+  f.selesai = true;
+  f.kartu.className = "kartu selesai";
+  f.tombol.forEach(function (b) { b.disabled = true; });
+  var s = document.createElement("div");
+  s.className = "kecil";
+  s.textContent = ket;
+  f.kartu.appendChild(s);
+}
+
+async function lihat(f) {
+  try {
+    await Word.run(f.range, async function (ctx) {
+      f.range.select();
+      await ctx.sync();
+    });
+  } catch (e) {
+    status("Tidak bisa menandai teks. Mungkin sudah berubah.", "err");
+  }
+}
+
+async function ganti(f) {
+  var ok = false;
+  try {
+    await Word.run(f.range, async function (ctx) {
+      f.range.load("text");
+      await ctx.sync();
+      if (f.range.text === f.salah) {
+        f.range.insertText(f.saran, "Replace");
+        await ctx.sync();
+        ok = true;
+      }
+    });
+  } catch (e) { ok = false; }
+  return ok;
+}
+
+async function gantiSemua() {
+  var gagal = 0, sukses = 0;
+  for (var i = 0; i < temuan.length; i++) {
+    var f = temuan[i];
+    if (f.selesai) continue;
+    var ok = await ganti(f);
+    if (ok) { tutup(f, "Sudah diganti"); sukses++; } else { gagal++; }
+  }
+  status(sukses + " diganti, " + gagal + " dilewati karena teks sudah berubah.", "ok");
+}
+</script>
+</body>
+</html>
