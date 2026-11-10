@@ -23,17 +23,18 @@
   button.utama:hover { background: #0c5a9e; }
   .baris { display: flex; gap: 6px; margin-top: 8px; }
   .kecil { font-size: 12px; color: #666; margin: 6px 0 10px; }
-  #status { margin: 10px 0; padding: 8px; border-radius: 4px; display: none; white-space: pre-wrap; word-break: break-word; }
-  #status.info { display: block; background: #eef5fc; }
-  #status.err { display: block; background: #fdecea; color: #8a1f11; }
-  #status.ok { display: block; background: #eaf6ec; color: #1e5b2a; }
+  #status { margin: 10px 0; padding: 8px; border-radius: 4px; display: none; white-space: pre-wrap; word-break: break-word; position: sticky; top: 0; z-index: 10; }
+  #status.info { display: block; background: #eef5fc; border: 1px solid #c9ddf0; }
+  #status.err { display: block; background: #fdecea; color: #8a1f11; border: 1px solid #f0c4be; }
+  #status.ok { display: block; background: #eaf6ec; color: #1e5b2a; border: 1px solid #bfe0c6; }
   .kartu { border: 1px solid #d8d8d8; border-left: 4px solid #d9534f; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
-  .kartu.selesai { opacity: .5; border-left-color: #999; }
+  .kartu.selesai { opacity: .55; border-left-color: #999; }
   .jenis { display: inline-block; font-size: 11px; background: #f3e3e2; color: #8a1f11; padding: 1px 6px; border-radius: 10px; margin-bottom: 4px; }
   .salah { text-decoration: line-through; color: #b32d2e; }
   .saran { font-weight: 600; color: #1e7e34; }
   .alasan { margin: 4px 0 6px; color: #444; }
   .tombol { display: flex; gap: 6px; }
+  .pesan { margin: 6px 0 0; font-size: 12px; }
 </style>
 </head>
 <body>
@@ -76,7 +77,6 @@ var DEFAULT_MODEL = { gemini: "gemini-2.5-flash", openai: "gpt-4o-mini" };
 var KODE_SIBUK = [500, 502, 503, 504];
 var KODE_PINDAH = [429, 500, 502, 503, 504];
 
-var scope = null;
 var temuan = [];
 var sibuk = false;
 var provAktif = "gemini";
@@ -134,7 +134,6 @@ function simpanSaatIni() {
 }
 
 Office.onReady(function (info) {
-  // pindahkan pengaturan versi lama
   var lamaKey = bacaLokal("gg_api_key");
   if (lamaKey && !bacaLokal(kKey("gemini"))) simpanLokal(kKey("gemini"), lamaKey);
   var lamaModel = bacaLokal("gg_model");
@@ -374,18 +373,7 @@ async function cariModel() {
   }
 }
 
-// ---------- Dokumen Word ----------
-async function lepasRange() {
-  var ctx = scope ? scope.context : null;
-  temuan.forEach(function (f) {
-    try { f.range.context.trackedObjects.remove(f.range); ctx = f.range.context; } catch (e) {}
-  });
-  if (scope) { try { scope.context.trackedObjects.remove(scope); } catch (e) {} }
-  if (ctx) { try { await ctx.sync(); } catch (e) {} }
-  temuan = [];
-  scope = null;
-}
-
+// ---------- Teks dan posisi di dokumen ----------
 async function ambilTeks() {
   var teks = "";
   await Word.run(async function (context) {
@@ -394,45 +382,95 @@ async function ambilTeks() {
     await context.sync();
     var r = sel;
     if (!sel.text || sel.text.trim().length < 3) {
-      r = sel.paragraphs.getFirst().getRange("Content");
+      r = sel.paragraphs.getFirst();
       r.load("text");
       await context.sync();
     }
     teks = r.text;
-    context.trackedObjects.add(r);
-    await context.sync();
-    scope = r;
   });
-  return teks.replace(/\r/g, "\n").replace(/\u0007/g, " ").replace(/\u000b/g, " ");
+  return teks.replace(/[\r\u0007\u000b]/g, "\n");
 }
 
-async function petakan(items) {
+function hitung(teks, cari) {
+  var n = 0, p = 0;
+  if (!cari) return 0;
+  while ((p = teks.indexOf(cari, p)) >= 0) { n++; p += cari.length; }
+  return n;
+}
+
+function adaBatas(teks, i, panjang) {
+  var huruf = /[\p{L}\p{N}]/u;
+  var sebelum = i > 0 ? teks.charAt(i - 1) : "";
+  var sesudah = (i + panjang) < teks.length ? teks.charAt(i + panjang) : "";
+  if (sebelum && huruf.test(sebelum)) return false;
+  if (sesudah && huruf.test(sesudah)) return false;
+  return true;
+}
+
+// Potongan teks di sekitar kata, dipakai untuk mencari posisinya lagi saat tombol diklik
+function buatKonteks(teks, pos, salah) {
+  var lebar = Math.max(0, Math.min(30, Math.floor((250 - salah.length) / 2)));
+  var b = teks.slice(Math.max(0, pos - lebar), pos);
+  var a = teks.slice(pos + salah.length, pos + salah.length + lebar);
+  var nb = b.lastIndexOf("\n");
+  if (nb >= 0) b = b.slice(nb + 1);
+  var na = a.indexOf("\n");
+  if (na >= 0) a = a.slice(0, na);
+  var daftar = [];
+  if (b && a) daftar.push({ teks: b + salah + a, k: hitung(b, salah) });
+  if (b) daftar.push({ teks: b + salah, k: hitung(b, salah) });
+  if (a) daftar.push({ teks: salah + a, k: 0 });
+  return daftar;
+}
+
+function petakan(teks, items) {
   var hasil = [];
-  var dipakai = {};
-  await Word.run(scope, async function (context) {
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      try {
-        var satuKata = /^[\p{L}\p{N}]+$/u.test(it.salah);
-        var hits = scope.search(it.salah.replace(/\^/g, "^^"), { matchCase: true, matchWholeWord: satuKata });
-        hits.load("items");
-        await context.sync();
-        var n = dipakai[it.salah] || 0;
-        if (n < hits.items.length) {
-          var rg = hits.items[n];
-          context.trackedObjects.add(rg);
-          await context.sync();
-          it.range = rg;
-          it.selesai = false;
-          dipakai[it.salah] = n + 1;
-          hasil.push(it);
-        }
-      } catch (e) { /* lewati temuan yang tidak bisa dicari */ }
+  var posisiTerakhir = {};
+  items.forEach(function (it) {
+    var satuKata = /^[\p{L}\p{N}]+$/u.test(it.salah);
+    var p = posisiTerakhir[it.salah] || 0;
+    var pos = -1;
+    while ((p = teks.indexOf(it.salah, p)) >= 0) {
+      if (!satuKata || adaBatas(teks, p, it.salah.length)) { pos = p; break; }
+      p += 1;
     }
+    if (pos < 0) return;
+    posisiTerakhir[it.salah] = pos + it.salah.length;
+    it.ctx = buatKonteks(teks, pos, it.salah);
+    it.selesai = false;
+    hasil.push(it);
   });
   return hasil;
 }
 
+function esc(s) { return s.replace(/\^/g, "^^"); }
+
+async function cariRange(context, f) {
+  var body = context.document.body;
+  for (var i = 0; i < f.ctx.length; i++) {
+    var c = f.ctx[i];
+    try {
+      var h1 = body.search(esc(c.teks), { matchCase: true });
+      h1.load("items");
+      await context.sync();
+      if (h1.items.length === 0) continue;
+      var h2 = h1.items[0].search(esc(f.salah), { matchCase: true });
+      h2.load("items");
+      await context.sync();
+      if (h2.items.length > c.k) return h2.items[c.k];
+      if (h2.items.length > 0) return h2.items[0];
+    } catch (e) { /* coba potongan berikutnya */ }
+  }
+  try {
+    var h3 = body.search(esc(f.salah), { matchCase: true });
+    h3.load("items");
+    await context.sync();
+    if (h3.items.length === 1) return h3.items[0];
+  } catch (e) {}
+  return null;
+}
+
+// ---------- Alur pemeriksaan ----------
 async function periksa() {
   if (sibuk) return;
   var key = $("key").value.trim();
@@ -445,8 +483,8 @@ async function periksa() {
   $("cek").disabled = true;
   $("aksi").style.display = "none";
   $("hasil").innerHTML = "";
+  temuan = [];
   try {
-    await lepasRange();
     status("Membaca teks dari dokumen...");
     var teks = await ambilTeks();
     if (!teks || teks.trim().length < 5) { status("Teks terlalu pendek atau kosong.", "err"); return; }
@@ -472,7 +510,7 @@ async function periksa() {
         break;
       } catch (e) {
         terakhir = e;
-            if (!bolehPindah(e)) throw e;
+        if (!bolehPindah(e)) throw e;
       }
     }
     if (daftar === undefined) throw terakhir;
@@ -480,9 +518,9 @@ async function periksa() {
     var catatan = dipakai !== model ? " Model cadangan yang dipakai: " + dipakai + "." : "";
     if (daftar.length === 0) { status("Tidak ada kesalahan yang ditemukan." + catatan, "ok"); return; }
 
-    temuan = await petakan(daftar);
+    temuan = petakan(teks, daftar);
     if (temuan.length === 0) {
-      status("Model memberi saran, tapi teksnya tidak ketemu di dokumen. Coba periksa ulang." + catatan, "err");
+      status("Model memberi saran, tapi teksnya tidak cocok dengan isi dokumen. Coba periksa ulang." + catatan, "err");
       return;
     }
     tampilkan();
@@ -494,6 +532,24 @@ async function periksa() {
     sibuk = false;
     $("cek").disabled = false;
   }
+}
+
+// ---------- Kartu hasil ----------
+function pesanKartu(f, teks, err) {
+  if (!f.pesan) {
+    f.pesan = document.createElement("div");
+    f.pesan.className = "pesan";
+    f.kartu.appendChild(f.pesan);
+  }
+  f.pesan.style.color = err ? "#8a1f11" : "#1e5b2a";
+  f.pesan.textContent = teks;
+}
+
+function tutup(f, ket) {
+  f.selesai = true;
+  f.kartu.className = "kartu selesai";
+  f.tombol.forEach(function (b) { b.disabled = true; });
+  pesanKartu(f, ket, false);
 }
 
 function tampilkan() {
@@ -530,65 +586,73 @@ function tampilkan() {
 
     f.kartu = kartu;
     f.tombol = [bLihat, bGanti, bLewat];
+    f.pesan = null;
 
-    bLihat.onclick = function () { lihat(f); };
-    bGanti.onclick = async function () {
-      var ok = await ganti(f);
-      if (ok) tutup(f, "Sudah diganti");
-      else status("Teks sudah berubah, tidak bisa diganti.", "err");
+    bLihat.onclick = async function () {
+      pesanKartu(f, "Mencari di dokumen...", false);
+      try {
+        var hasil = await lihat(f);
+        if (hasil) pesanKartu(f, "Teks ditandai di dokumen.", false);
+        else pesanKartu(f, "Teks tidak ditemukan lagi di dokumen. Mungkin sudah diubah.", true);
+      } catch (e) {
+        pesanKartu(f, "Gagal: " + (e.message || e), true);
+      }
     };
-    bLewat.onclick = function () { tutup(f, "Dilewati"); };
+    bGanti.onclick = async function () {
+      pesanKartu(f, "Mengganti...", false);
+      try {
+        var hasil = await ganti(f);
+        if (hasil) tutup(f, "Sudah diganti.");
+        else pesanKartu(f, "Teks tidak ditemukan lagi di dokumen. Mungkin sudah diubah.", true);
+      } catch (e) {
+        pesanKartu(f, "Gagal: " + (e.message || e), true);
+      }
+    };
+    bLewat.onclick = function () { tutup(f, "Dilewati."); };
 
     wadah.appendChild(kartu);
   });
 }
 
-function tutup(f, ket) {
-  f.selesai = true;
-  f.kartu.className = "kartu selesai";
-  f.tombol.forEach(function (b) { b.disabled = true; });
-  var s = document.createElement("div");
-  s.className = "kecil";
-  s.textContent = ket;
-  f.kartu.appendChild(s);
-}
-
 async function lihat(f) {
-  try {
-    await Word.run(f.range, async function (ctx) {
-      f.range.select();
-      await ctx.sync();
-    });
-  } catch (e) {
-    status("Tidak bisa menandai teks. Mungkin sudah berubah.", "err");
-  }
+  var ok = false;
+  await Word.run(async function (context) {
+    var r = await cariRange(context, f);
+    if (r) {
+      r.select("Select");
+      await context.sync();
+      ok = true;
+    }
+  });
+  return ok;
 }
 
 async function ganti(f) {
   var ok = false;
-  try {
-    await Word.run(f.range, async function (ctx) {
-      f.range.load("text");
-      await ctx.sync();
-      if (f.range.text === f.salah) {
-        f.range.insertText(f.saran, "Replace");
-        await ctx.sync();
-        ok = true;
-      }
-    });
-  } catch (e) { ok = false; }
+  await Word.run(async function (context) {
+    var r = await cariRange(context, f);
+    if (r) {
+      r.insertText(f.saran, "Replace");
+      await context.sync();
+      ok = true;
+    }
+  });
   return ok;
 }
 
 async function gantiSemua() {
   var gagal = 0, sukses = 0;
+  $("semua").disabled = true;
   for (var i = 0; i < temuan.length; i++) {
     var f = temuan[i];
     if (f.selesai) continue;
-    var ok = await ganti(f);
-    if (ok) { tutup(f, "Sudah diganti"); sukses++; } else { gagal++; }
+    var ok = false;
+    try { ok = await ganti(f); } catch (e) { ok = false; }
+    if (ok) { tutup(f, "Sudah diganti."); sukses++; }
+    else { pesanKartu(f, "Teks tidak ditemukan lagi di dokumen.", true); gagal++; }
   }
-  status(sukses + " diganti, " + gagal + " dilewati karena teks sudah berubah.", "ok");
+  $("semua").disabled = false;
+  status(sukses + " diganti, " + gagal + " gagal diganti.", sukses > 0 ? "ok" : "err");
 }
 </script>
 </body>
