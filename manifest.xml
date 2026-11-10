@@ -11,7 +11,7 @@
   <Description DefaultValue="Pemeriksa ejaan dan grammar memakai Gemini."/>
   <IconUrl DefaultValue="https://iniibubudi591-spec.github.io/cek-grammar/icon32.png"/>
   <HighResolutionIconUrl DefaultValue="https://iniibubudi591-spec.github.io/cek-grammar/icon64.png"/>
-  <SupportUrl DefaultValue="https://iniibubudi591-spec.github.io/cek-grammar/taskpane.html"/>
+  <SupportUrl DefaultValue="https://iniibubudi591-spec.github.io/cek-grammar/"/>
   <Hosts>
     <Host Name="Document"/>
   </Hosts>
