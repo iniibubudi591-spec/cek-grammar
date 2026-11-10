@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cek Grammar Gemini</title>
+<title>Cek Grammar</title>
 <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
 <style>
   * { box-sizing: border-box; }
@@ -13,7 +13,9 @@
   details { border: 1px solid #d0d0d0; border-radius: 6px; padding: 8px; margin-bottom: 10px; }
   summary { cursor: pointer; font-weight: 600; }
   label { display: block; margin: 8px 0 3px; font-size: 12px; color: #555; }
-  input, select { width: 100%; padding: 6px; border: 1px solid #bbb; border-radius: 4px; font-size: 13px; }
+  input[type=password], input[type=text], select { width: 100%; padding: 6px; border: 1px solid #bbb; border-radius: 4px; font-size: 13px; }
+  label.cb { display: flex; gap: 6px; align-items: flex-start; color: #222; margin-top: 10px; }
+  label.cb input { margin-top: 2px; }
   button { padding: 6px 10px; border: 1px solid #999; background: #f3f3f3; border-radius: 4px; cursor: pointer; font-size: 12px; }
   button:hover { background: #e6e6e6; }
   button:disabled { opacity: .5; cursor: default; }
@@ -39,17 +41,21 @@
 
 <details id="setelan" open>
   <summary>Pengaturan</summary>
-  <label for="key">API key Gemini</label>
+  <label for="prov">Penyedia</label>
+  <select id="prov">
+    <option value="gemini">Google (Gemini dan Gemma)</option>
+    <option value="openai">OpenAI</option>
+  </select>
+  <label for="key">API key</label>
   <input id="key" type="password" autocomplete="off" placeholder="Tempel API key di sini">
   <label for="model">Model</label>
-  <select id="model">
-    <option value="gemini-3.8-flash">gemini-3.8-flash (tebakan awal)</option>
-  </select>
+  <select id="model"></select>
+  <label class="cb"><input type="checkbox" id="auto"> Pindah otomatis ke model lain kalau server sibuk</label>
   <div class="baris">
     <button id="simpan">Simpan</button>
     <button id="cari">Cari model</button>
   </div>
-  <p class="kecil">API key disimpan di browser Word kamu, bukan di file ini.</p>
+  <p class="kecil">API key disimpan di browser Word kamu, bukan di file ini. Gemma tidak mendukung format JSON paksa, jadi hasilnya bisa kurang rapi.</p>
 </details>
 
 <p class="kecil">Blok teks yang mau dicek. Kalau tidak ada yang diblok, yang dicek adalah paragraf tempat kursor berada. Maksimal 6000 karakter.</p>
@@ -61,26 +67,33 @@
 <div id="hasil"></div>
 
 <script>
-var BASE = "https://generativelanguage.googleapis.com/v1beta/";
-var K_KEY = "gg_api_key";
-var K_MODEL = "gg_model";
+var GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/";
+var OPENAI_BASE = "https://api.openai.com/v1/";
 var MAX_CHARS = 6000;
+var K_PROV = "gg_prov";
+var K_AUTO = "gg_auto";
+var DEFAULT_MODEL = { gemini: "gemini-2.5-flash", openai: "gpt-4o-mini" };
+var KODE_SIBUK = [500, 502, 503, 504];
+var KODE_PINDAH = [429, 500, 502, 503, 504];
 
 var scope = null;
 var temuan = [];
 var sibuk = false;
+var provAktif = "gemini";
 
 function $(id) { return document.getElementById(id); }
-
+function kKey(p) { return "gg_key_" + p; }
+function kModel(p) { return "gg_model_" + p; }
+function kList(p) { return "gg_list_" + p; }
 function simpanLokal(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function bacaLokal(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
+function tunggu(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
 function status(teks, jenis) {
   var el = $("status");
   el.className = jenis || "info";
   el.textContent = teks;
 }
-function sembunyiStatus() { $("status").className = ""; $("status").style.display = "none"; }
 
 function atur(selectEl, nilai) {
   var ada = false;
@@ -95,76 +108,249 @@ function atur(selectEl, nilai) {
   selectEl.value = nilai;
 }
 
+function isiModel(list, pilih) {
+  var sel = $("model");
+  sel.innerHTML = "";
+  list.forEach(function (n) {
+    var o = document.createElement("option");
+    o.value = n; o.textContent = n;
+    sel.appendChild(o);
+  });
+  if (pilih) atur(sel, pilih);
+}
+
+function muatProv(p) {
+  $("key").value = bacaLokal(kKey(p));
+  var list = [];
+  try { list = JSON.parse(bacaLokal(kList(p)) || "[]"); } catch (e) { list = []; }
+  isiModel(list, bacaLokal(kModel(p)) || DEFAULT_MODEL[p]);
+}
+
+function simpanSaatIni() {
+  simpanLokal(kKey(provAktif), $("key").value.trim());
+  simpanLokal(kModel(provAktif), $("model").value);
+  simpanLokal(K_AUTO, $("auto").checked ? "1" : "0");
+  simpanLokal(K_PROV, provAktif);
+}
+
 Office.onReady(function (info) {
-  $("key").value = bacaLokal(K_KEY);
-  var m = bacaLokal(K_MODEL);
-  if (m) atur($("model"), m);
-  $("simpan").onclick = function () {
-    simpanLokal(K_KEY, $("key").value.trim());
-    simpanLokal(K_MODEL, $("model").value);
-    status("Pengaturan disimpan.", "ok");
+  // pindahkan pengaturan versi lama
+  var lamaKey = bacaLokal("gg_api_key");
+  if (lamaKey && !bacaLokal(kKey("gemini"))) simpanLokal(kKey("gemini"), lamaKey);
+  var lamaModel = bacaLokal("gg_model");
+  if (lamaModel && !bacaLokal(kModel("gemini"))) simpanLokal(kModel("gemini"), lamaModel);
+
+  provAktif = bacaLokal(K_PROV) || "gemini";
+  $("prov").value = provAktif;
+  $("auto").checked = bacaLokal(K_AUTO) !== "0";
+  muatProv(provAktif);
+
+  $("prov").onchange = function () {
+    simpanSaatIni();
+    provAktif = $("prov").value;
+    muatProv(provAktif);
+    simpanLokal(K_PROV, provAktif);
   };
+  $("simpan").onclick = function () { simpanSaatIni(); status("Pengaturan disimpan.", "ok"); };
   $("cari").onclick = cariModel;
   $("cek").onclick = periksa;
   $("semua").onclick = gantiSemua;
-  if (info.host !== Office.HostType.Word) {
-    status("Add-in ini dibuat untuk Word.", "err");
-  }
+  if (info.host !== Office.HostType.Word) status("Add-in ini dibuat untuk Word.", "err");
 });
 
+// ---------- Pemanggilan API ----------
 function petunjuk(kode, data, raw) {
   var pesan = (data && data.error && data.error.message) || String(raw).slice(0, 300);
   var peta = {
     400: "API key tidak valid, atau permintaan salah format.",
-    403: "API key tidak punya izin, atau dibatasi di Google Cloud.",
+    401: "API key salah atau tidak aktif.",
+    403: "API key tidak punya izin, atau dibatasi.",
     404: "Nama model tidak ditemukan. Klik Cari model.",
-    429: "Kuota gratis habis atau terlalu banyak permintaan. Tunggu beberapa menit.",
-    500: "Server Google bermasalah. Coba lagi nanti.",
-    503: "Server Google sedang sibuk. Coba lagi nanti."
+    429: "Kuota atau saldo habis, atau terlalu banyak permintaan.",
+    500: "Server bermasalah. Coba lagi nanti.",
+    502: "Server bermasalah. Coba lagi nanti.",
+    503: "Server sedang sibuk. Coba lagi nanti.",
+    504: "Server terlalu lama membalas. Coba lagi nanti."
   };
   return "Kode " + kode + ". " + (peta[kode] || "") + "\nPesan server: " + pesan;
 }
 
+function galat(kode, data, raw) {
+  var e = new Error(petunjuk(kode, data, raw));
+  e.kode = kode;
+  return e;
+}
+
+async function kirim(url, opsi) {
+  var res;
+  try {
+    res = await fetch(url, opsi);
+  } catch (e) {
+    throw new Error("Tidak bisa menjangkau server. Cek internet, VPN, proxy, atau firewall. Detail: " + e.message);
+  }
+  var raw = await res.text();
+  var data = null;
+  try { data = JSON.parse(raw); } catch (e) {}
+  if (!res.ok) throw galat(res.status, data, raw);
+  return data;
+}
+
+function buatPrompt(teks, bentuk) {
+  var p =
+    "Kamu editor bahasa yang teliti. Periksa teks di bawah untuk salah ketik, salah ejaan, salah tata bahasa, " +
+    "pilihan kata yang kurang tepat, dan kalimat yang tidak efektif. Teks bisa berbahasa Indonesia atau Inggris. " +
+    "Tulis \"saran\" dalam bahasa yang sama dengan teks. Tulis \"alasan\" dalam bahasa Indonesia, satu kalimat pendek.\n" +
+    "Aturan:\n" +
+    "1. \"salah\" harus disalin persis dari teks, termasuk huruf besar dan tanda baca. Pilih bagian sependek mungkin yang masih jelas.\n" +
+    "2. \"saran\" adalah pengganti untuk \"salah\" saja, bukan seluruh kalimat.\n" +
+    "3. \"jenis\" harus salah satu dari: ejaan, grammar, pilihan kata, kalimat efektif, tanda baca.\n" +
+    "4. Jika kesalahan yang sama muncul lebih dari sekali, tulis setiap kemunculan.\n" +
+    "5. Urutkan sesuai urutan kemunculan di teks.\n" +
+    "6. Jangan ubah gaya penulis kalau tidak ada kesalahan nyata.\n" +
+    "7. Jika tidak ada kesalahan, kembalikan daftar kosong.\n";
+  if (bentuk === "array") {
+    p += "Format balasan: hanya satu array JSON, tanpa markdown dan tanpa teks lain. " +
+         "Setiap item punya kunci salah, saran, alasan, jenis. Jika tidak ada kesalahan, balas [].\n";
+  } else if (bentuk === "objek") {
+    p += "Format balasan: hanya satu objek JSON berbentuk {\"temuan\": [ ... ]}. " +
+         "Setiap item di temuan punya kunci salah, saran, alasan, jenis. Jika tidak ada kesalahan, balas {\"temuan\": []}.\n";
+  }
+  return p + "Teks:\n" + teks;
+}
+
+async function panggilGemini(key, model, prompt, pakaiSkema) {
+  var konfig = { temperature: 0.1 };
+  if (pakaiSkema) {
+    konfig.responseMimeType = "application/json";
+    konfig.responseSchema = {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          salah: { type: "STRING" },
+          saran: { type: "STRING" },
+          alasan: { type: "STRING" },
+          jenis: { type: "STRING" }
+        },
+        required: ["salah", "saran", "alasan"]
+      }
+    };
+  }
+  var data = await kirim(GEMINI_BASE + "models/" + encodeURIComponent(model) + ":generateContent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }], generationConfig: konfig })
+  });
+  var cand = data && data.candidates && data.candidates[0];
+  if (!cand || !cand.content || !cand.content.parts) {
+    var sebab = (data && data.promptFeedback && data.promptFeedback.blockReason) || (cand && cand.finishReason) || "tidak diketahui";
+    throw new Error("Respons kosong. Alasan: " + sebab);
+  }
+  return cand.content.parts.filter(function (p) { return !p.thought; })
+    .map(function (p) { return p.text || ""; }).join("");
+}
+
+async function panggilOpenAI(key, model, prompt) {
+  var data = await kirim(OPENAI_BASE + "chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+    body: JSON.stringify({
+      model: model,
+      messages: [
+        { role: "system", content: "Kamu editor bahasa yang teliti. Balas hanya dengan JSON." },
+        { role: "user", content: prompt }
+      ],
+      response_format: { type: "json_object" }
+    })
+  });
+  var ch = data && data.choices && data.choices[0];
+  if (!ch || !ch.message || !ch.message.content) throw new Error("Respons kosong dari OpenAI.");
+  return ch.message.content;
+}
+
+function ambilArray(txt) {
+  var t = String(txt).trim().replace(/^```(?:json)?/i, "").replace(/```$/, "").trim();
+  var obj;
+  try {
+    obj = JSON.parse(t);
+  } catch (e) {
+    var a = t.indexOf("["), b = t.lastIndexOf("]");
+    var c = t.indexOf("{"), d = t.lastIndexOf("}");
+    try {
+      if (a >= 0 && b > a) obj = JSON.parse(t.slice(a, b + 1));
+      else if (c >= 0 && d > c) obj = JSON.parse(t.slice(c, d + 1));
+    } catch (e2) { obj = undefined; }
+  }
+  if (obj === undefined) throw new Error("Format balasan model tidak bisa dibaca. Coba model lain.");
+  if (Array.isArray(obj)) return obj;
+  if (obj && Array.isArray(obj.temuan)) return obj.temuan;
+  return [];
+}
+
+async function tanya(prov, key, model, teks) {
+  var isi;
+  if (prov === "openai") isi = await panggilOpenAI(key, model, buatPrompt(teks, "objek"));
+  else if (/^gemma/i.test(model)) isi = await panggilGemini(key, model, buatPrompt(teks, "array"), false);
+  else isi = await panggilGemini(key, model, buatPrompt(teks, "skema"), true);
+
+  return ambilArray(isi).filter(function (t) {
+    return t && typeof t.salah === "string" && typeof t.saran === "string" &&
+      t.salah.length > 0 && t.salah.length <= 250 &&
+      t.salah.indexOf("\n") < 0 && t.salah !== t.saran;
+  });
+}
+
+async function tanyaDenganUlang(prov, key, model, teks) {
+  var jeda = [0, 2000, 5000];
+  var err;
+  for (var i = 0; i < jeda.length; i++) {
+    if (jeda[i]) {
+      status("Server sibuk. Mencoba lagi (" + i + " dari 2)...");
+      await tunggu(jeda[i]);
+    }
+    try {
+      return await tanya(prov, key, model, teks);
+    } catch (e) {
+      err = e;
+      if (KODE_SIBUK.indexOf(e.kode) < 0) throw e;
+    }
+  }
+  throw err;
+}
+
+// ---------- Daftar model ----------
 async function cariModel() {
   var key = $("key").value.trim();
   if (!key) { status("Isi API key dulu.", "err"); return; }
   status("Mengambil daftar model...");
   try {
-    var res;
-    try {
-      res = await fetch(BASE + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
-    } catch (e) {
-      throw new Error("Tidak bisa menjangkau server Google. Cek internet, VPN, proxy, atau firewall. Detail: " + e.message);
+    var nama = [];
+    if (provAktif === "openai") {
+      var d1 = await kirim(OPENAI_BASE + "models", { headers: { "Authorization": "Bearer " + key } });
+      nama = ((d1 && d1.data) || []).map(function (m) { return m.id; })
+        .filter(function (n) { return /^(gpt|o[0-9]|chatgpt)/.test(n); })
+        .filter(function (n) { return !/audio|realtime|image|tts|transcribe|embed|moderation|search|whisper|dall|instruct|computer-use|codex/.test(n); });
+    } else {
+      var d2 = await kirim(GEMINI_BASE + "models?pageSize=200", { headers: { "x-goog-api-key": key } });
+      nama = ((d2 && d2.models) || [])
+        .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
+        .map(function (m) { return m.name.replace(/^models\//, ""); })
+        .filter(function (n) { return !/tts|image|live|audio|embedding|robotics|veo|imagen|vision|computer-use/.test(n); });
     }
-    var raw = await res.text();
-    var data = null;
-    try { data = JSON.parse(raw); } catch (e) {}
-    if (!res.ok) throw new Error(petunjuk(res.status, data, raw));
+    nama.sort();
+    if (nama.length === 0) { status("Tidak ada model yang cocok untuk key ini.", "err"); return; }
 
-    var nama = ((data && data.models) || [])
-      .filter(function (m) { return (m.supportedGenerationMethods || []).indexOf("generateContent") >= 0; })
-      .map(function (m) { return m.name.replace(/^models\//, ""); })
-      .filter(function (n) { return /flash/.test(n) && !/tts|image|live|audio|embedding|robotics/.test(n); });
-
-    if (nama.length === 0) { status("Tidak ada model flash yang cocok untuk key ini.", "err"); return; }
-
-    var sel = $("model");
-    sel.innerHTML = "";
-    nama.forEach(function (n) {
-      var o = document.createElement("option");
-      o.value = n; o.textContent = n;
-      sel.appendChild(o);
-    });
-    var pilih = nama.filter(function (n) { return n.indexOf("2.5-flash") >= 0; })[0] || nama[0];
-    sel.value = pilih;
-    simpanLokal(K_KEY, key);
-    simpanLokal(K_MODEL, pilih);
-    status("Ditemukan " + nama.length + " model. Terpilih: " + pilih, "ok");
+    var sebelum = $("model").value;
+    isiModel(nama, nama.indexOf(sebelum) >= 0 ? sebelum : nama[0]);
+    simpanLokal(kList(provAktif), JSON.stringify(nama));
+    simpanSaatIni();
+    status("Ditemukan " + nama.length + " model. Pilih salah satu di kolom Model.", "ok");
   } catch (e) {
     status(e.message, "err");
   }
 }
 
+// ---------- Dokumen Word ----------
 async function lepasRange() {
   var ctx = scope ? scope.context : null;
   temuan.forEach(function (f) {
@@ -194,75 +380,6 @@ async function ambilTeks() {
     scope = r;
   });
   return teks.replace(/\r/g, "\n").replace(/\u0007/g, " ").replace(/\u000b/g, " ");
-}
-
-async function tanyaGemini(key, model, teks) {
-  var prompt =
-    "Kamu editor bahasa yang teliti. Periksa teks di bawah untuk salah ketik, salah ejaan, salah tata bahasa, " +
-    "pilihan kata yang kurang tepat, dan kalimat yang tidak efektif. Teks bisa berbahasa Indonesia atau Inggris. " +
-    "Tulis \"saran\" dalam bahasa yang sama dengan teks. Tulis \"alasan\" dalam bahasa Indonesia, satu kalimat pendek.\n" +
-    "Aturan:\n" +
-    "1. \"salah\" harus disalin persis dari teks, termasuk huruf besar dan tanda baca. Pilih bagian sependek mungkin yang masih jelas.\n" +
-    "2. \"saran\" adalah pengganti untuk \"salah\" saja, bukan seluruh kalimat.\n" +
-    "3. \"jenis\" harus salah satu dari: ejaan, grammar, pilihan kata, kalimat efektif, tanda baca.\n" +
-    "4. Jika kesalahan yang sama muncul lebih dari sekali, tulis setiap kemunculan.\n" +
-    "5. Urutkan sesuai urutan kemunculan di teks.\n" +
-    "6. Jangan ubah gaya penulis kalau tidak ada kesalahan nyata.\n" +
-    "7. Jika tidak ada kesalahan, kembalikan array kosong.\n" +
-    "Teks:\n" + teks;
-
-  var body = {
-    contents: [{ parts: [{ text: prompt }] }],
-    generationConfig: {
-      temperature: 0.1,
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: "ARRAY",
-        items: {
-          type: "OBJECT",
-          properties: {
-            salah: { type: "STRING" },
-            saran: { type: "STRING" },
-            alasan: { type: "STRING" },
-            jenis: { type: "STRING" }
-          },
-          required: ["salah", "saran", "alasan"]
-        }
-      }
-    }
-  };
-
-  var res;
-  try {
-    res = await fetch(BASE + "models/" + encodeURIComponent(model) + ":generateContent", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
-      body: JSON.stringify(body)
-    });
-  } catch (e) {
-    throw new Error("Tidak bisa menjangkau server Google. Cek internet, VPN, proxy, atau firewall. Detail: " + e.message);
-  }
-  var raw = await res.text();
-  var data = null;
-  try { data = JSON.parse(raw); } catch (e) {}
-  if (!res.ok) throw new Error(petunjuk(res.status, data, raw));
-
-  var cand = data && data.candidates && data.candidates[0];
-  if (!cand || !cand.content || !cand.content.parts) {
-    var sebab = (data && data.promptFeedback && data.promptFeedback.blockReason) || (cand && cand.finishReason) || "tidak diketahui";
-    throw new Error("Respons kosong. Alasan: " + sebab);
-  }
-  var txt = cand.content.parts.filter(function (p) { return !p.thought; })
-    .map(function (p) { return p.text || ""; }).join("");
-  var arr;
-  try { arr = JSON.parse(txt); } catch (e) { throw new Error("Format balasan Gemini tidak bisa dibaca."); }
-  if (!Array.isArray(arr)) return [];
-
-  return arr.filter(function (t) {
-    return t && typeof t.salah === "string" && typeof t.saran === "string" &&
-      t.salah.length > 0 && t.salah.length <= 250 &&
-      t.salah.indexOf("\n") < 0 && t.salah !== t.saran;
-  });
 }
 
 async function petakan(items) {
@@ -297,8 +414,8 @@ async function periksa() {
   var key = $("key").value.trim();
   var model = $("model").value;
   if (!key) { $("setelan").open = true; status("Isi API key dulu.", "err"); return; }
-  simpanLokal(K_KEY, key);
-  simpanLokal(K_MODEL, model);
+  if (!model) { $("setelan").open = true; status("Pilih model dulu. Klik Cari model.", "err"); return; }
+  simpanSaatIni();
 
   sibuk = true;
   $("cek").disabled = true;
@@ -313,17 +430,39 @@ async function periksa() {
       status("Teks terlalu panjang (" + teks.length + " karakter). Maksimal " + MAX_CHARS + ". Blok per bagian.", "err");
       return;
     }
-    status("Menunggu Gemini. Word tetap bisa dipakai.");
-    var daftar = await tanyaGemini(key, model, teks);
-    if (daftar.length === 0) { status("Tidak ada kesalahan yang ditemukan.", "ok"); return; }
+
+    var urut = [model];
+    if ($("auto").checked) {
+      var opsi = $("model").options;
+      for (var i = 0; i < opsi.length && urut.length < 4; i++) {
+        if (opsi[i].value !== model) urut.push(opsi[i].value);
+      }
+    }
+
+    var daftar, dipakai, terakhir;
+    for (var j = 0; j < urut.length; j++) {
+      status("Menunggu " + urut[j] + ". Word tetap bisa dipakai.");
+      try {
+        daftar = await tanyaDenganUlang(provAktif, key, urut[j], teks);
+        dipakai = urut[j];
+        break;
+      } catch (e) {
+        terakhir = e;
+        if (KODE_PINDAH.indexOf(e.kode) < 0) throw e;
+      }
+    }
+    if (daftar === undefined) throw terakhir;
+
+    var catatan = dipakai !== model ? " Model cadangan yang dipakai: " + dipakai + "." : "";
+    if (daftar.length === 0) { status("Tidak ada kesalahan yang ditemukan." + catatan, "ok"); return; }
 
     temuan = await petakan(daftar);
     if (temuan.length === 0) {
-      status("Gemini memberi saran, tapi teksnya tidak ketemu di dokumen. Coba periksa ulang.", "err");
+      status("Model memberi saran, tapi teksnya tidak ketemu di dokumen. Coba periksa ulang." + catatan, "err");
       return;
     }
     tampilkan();
-    status("Ditemukan " + temuan.length + " temuan.", "info");
+    status("Ditemukan " + temuan.length + " temuan." + catatan, "info");
     $("aksi").style.display = "block";
   } catch (e) {
     status(e.message || String(e), "err");
